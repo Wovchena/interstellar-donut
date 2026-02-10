@@ -82,7 +82,7 @@ class InterstellarDonut:
         # The torus surface spans from R2-R1=1.0 to R2+R1=3.0 in the radial direction.
         self.R1 = 1.0   # Tube radius (cross-section of torus)
         self.R2 = 2.0   # Distance from torus center to tube center
-        self.K2 = 5.0   # Distance from viewer to torus (perspective depth)
+        self.K2 = 15.0  # Distance from viewer to torus (perspective depth)
 
         # K1: projection scaling factor, auto-sized so the donut fits the screen.
         # Uses min(width, height*2) because terminal chars are ~2x taller than wide.
@@ -464,8 +464,9 @@ class InterstellarDonut:
 
         # === Pass 1: Accretion disk (pixel-resolution ray casting) ===
         disk_inner = 0.3
-        disk_outer = 5.5
+        disk_outer = 2000
         disk_peak = 2.0
+        disk_sigma2 = 6.0  # σ² for Gaussian falloff — wider = larger disk
         n_dot_c = nz * self.K2
 
         if abs(nz) > 0.01:
@@ -484,7 +485,7 @@ class InterstellarDonut:
                     vz = t - self.K2
                     dist = math.sqrt(vx * vx + vy * vy + vz * vz)
                     if disk_inner <= dist <= disk_outer:
-                        brightness = math.exp(-((dist - disk_peak) ** 2) / 2.0)
+                        brightness = math.exp(-((dist - disk_peak) ** 2) / disk_sigma2)
                         ooz = 1.0 / t
                         if brightness > 0.05 and ooz > zbuf[yp][xp]:
                             zbuf[yp][xp] = ooz
@@ -495,6 +496,8 @@ class InterstellarDonut:
         R2_shadow = self.R2
         is_shadow = [[False] * img_w for _ in range(img_h)]
         is_inner = [[False] * img_w for _ in range(img_h)]
+        # Track pixels where the torus actually won the z-test (is closest)
+        is_torus_front = [[False] * img_w for _ in range(img_h)]
 
         theta = 0.0
         while theta < 2 * math.pi:
@@ -509,24 +512,37 @@ class InterstellarDonut:
                 x = circlex * (cosB * cosphi + sinA * sinB * sinphi) - circley * cosA * sinB
                 y = circlex * (sinB * cosphi - sinA * cosB * sinphi) + circley * cosA * cosB
                 z = self.K2 + cosA * circlex * sinphi + circley * sinA
+
+                # Surface normal z-component: determines if this point
+                # faces the camera. Back-face points (norm_z > 0) project
+                # into the torus hole and must NOT darken those pixels —
+                # light passes through the hole.
+                norm_z = cosA * costheta * sinphi + sintheta * sinA
+                front_facing = norm_z < 0
+
                 if z > 0.5:
                     ooz = 1.0 / z
                     xp = int(half_w + K1x * ooz * x)
                     yp = int(half_h - K1y * ooz * y)
                     if 0 <= xp < img_w and 0 <= yp < img_h:
+                        # Always mark silhouette for edge detection
                         is_shadow[yp][xp] = True
-                        if ooz > zbuf[yp][xp]:
+                        # Only darken for front-facing surfaces
+                        if front_facing and ooz > zbuf[yp][xp]:
                             zbuf[yp][xp] = ooz
                             bright[yp][xp] = 0.0
                             is_inner[yp][xp] = (costheta < 0)
+                            is_torus_front[yp][xp] = True
                 phi += 0.002
             theta += 0.01
 
-        # Blank dim disk pixels inside shadow
+        # Blank dim disk pixels only where the torus is actually in front.
+        # (is_shadow includes back-face projections; using it here would
+        # incorrectly blank disk pixels that are genuinely closer.)
         min_bright = 0.3
         for yp in range(img_h):
             for xp in range(img_w):
-                if is_shadow[yp][xp] and 0 < bright[yp][xp] < min_bright:
+                if is_torus_front[yp][xp] and 0 < bright[yp][xp] < min_bright:
                     bright[yp][xp] = 0.0
 
         # === Pass 2b: Photon ring glow ===

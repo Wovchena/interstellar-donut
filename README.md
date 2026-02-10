@@ -2,6 +2,8 @@
 
 A mesmerizing rotating ASCII donut (torus) in the terminal with gravitational lensing effects inspired by general relativity and the movie "Interstellar".
 
+![Interstellar Donut](donut.gif)
+
 ## Features
 
 - **Rotating 3D Torus**: A spinning donut rendered in beautiful ASCII art

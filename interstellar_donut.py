@@ -123,11 +123,15 @@ class InterstellarDonut:
             display: If True, print the frame to stdout.
 
         Returns:
-            The 2D character grid (list of lists of chars).
+            Tuple of (output, bright_buffer):
+              output: 2D character grid (list of lists of chars).
+              bright_buffer: 2D continuous brightness [0..1] (list of lists of float).
         """
         ambient = '.'
         output = [[ambient for _ in range(self.width)] for _ in range(self.height)]
         zbuffer = [[0.0 for _ in range(self.width)] for _ in range(self.height)]
+        # Continuous brightness buffer for smooth pixel rendering
+        bright_buffer = [[0.05 for _ in range(self.width)] for _ in range(self.height)]  # ambient
 
         half_w = self.width / 2.0
         half_h = self.height / 2.0
@@ -212,6 +216,7 @@ class InterstellarDonut:
                         if char_idx >= 1 and ooz > zbuffer[yp][xp]:
                             zbuffer[yp][xp] = ooz
                             output[yp][xp] = self.disk_chars[min(char_idx, len(self.disk_chars) - 1)]
+                            bright_buffer[yp][xp] = brightness
 
         # === Pass 2: Black hole shadow (torus-shaped event horizon) ===
         # The donut is hollow in the middle — light from the accretion disk
@@ -269,6 +274,7 @@ class InterstellarDonut:
                         if ooz > zbuffer[yp][xp]:
                             zbuffer[yp][xp] = ooz
                             output[yp][xp] = ' '
+                            bright_buffer[yp][xp] = 0.0
                             # Inner tube surface (costheta < 0) faces the
                             # hole center — must stay black, no lensed ring.
                             is_inner_surface[yp][xp] = (costheta < 0)
@@ -287,6 +293,7 @@ class InterstellarDonut:
                     idx = self.disk_chars.find(output[yp][xp])
                     if 0 <= idx < min_visible_idx:
                         output[yp][xp] = ' '
+                        bright_buffer[yp][xp] = 0.0
 
         # === Pass 2b: Photon ring glow (bright halo around shadow edge) ===
         # Light concentrates near the unstable photon orbit, creating a
@@ -334,6 +341,7 @@ class InterstellarDonut:
                                     existing_idx = 0
                                 if glow_idx > existing_idx:
                                     output[ny2][nx2] = glow_chars[min(glow_idx, len(glow_chars) - 1)]
+                                    bright_buffer[ny2][nx2] = max(bright_buffer[ny2][nx2], glow_bright)
 
         # === Pass 3: Lensed ring (shadow-edge based) ===
         # The lensed ring represents the gravitationally bent image of the
@@ -387,6 +395,7 @@ class InterstellarDonut:
                                     existing_idx = 0
                                 if char_idx > existing_idx:
                                     output[ny2][nx2] = ring_chars[char_idx]
+                                    bright_buffer[ny2][nx2] = max(bright_buffer[ny2][nx2], brightness)
 
         #   Print the frame as a single write for flicker-free output
         if display:
@@ -396,7 +405,7 @@ class InterstellarDonut:
             sys.stdout.write('\n'.join(buf) + '\x1b[J')
             sys.stdout.flush()
 
-        return output
+        return output, bright_buffer
 
     # Brightness lookup: map each character to a 0.0-1.0 brightness value.
     # Combines both disk_chars and luminance_chars into a single table.
@@ -406,61 +415,253 @@ class InterstellarDonut:
         '#': 0.8, '$': 0.9, '@': 1.0,
     }
 
-    def render_frame_pixels(self):
-        """Render one frame as a 2D array of brightness floats [0..1].
+    def render_frame_pixels(self, img_w=None, img_h=None):
+        """Render one frame directly as a 2D float brightness array.
 
-        Returns:
-            List[List[float]]: height x width brightness values.
-        """
-        output = self.render_frame(display=False)
-        pixels = []
-        for row in output:
-            prow = []
-            for ch in row:
-                prow.append(self._CHAR_BRIGHTNESS.get(ch, 0.0))
-            pixels.append(prow)
-        return pixels
-
-    def save_gif(self, path, n_frames=150, fps=30):
-        """Render n_frames and save as an animated GIF.
+        All math is computed at full pixel resolution — no character grid,
+        no quantization. Same physics as render_frame() but continuous output.
 
         Args:
-            path: Output file path (should end in .gif).
-            n_frames: Number of frames to render.
-            fps: Frames per second in the output GIF.
-        """
-        from PIL import Image
+            img_w: Image width in pixels (default: width * 6).
+            img_h: Image height in pixels (default: height * 12).
 
-        cell_w = 6   # pixels per character cell width
-        cell_h = 12  # pixels per character cell height
-        img_w = self.width * cell_w
-        img_h = self.height * cell_h
+        Returns:
+            List[List[float]]: img_h x img_w brightness values in [0..1].
+        """
+        if img_w is None:
+            img_w = self.width * 6
+        if img_h is None:
+            img_h = self.height * 12
+
+        bright = [[0.02] * img_w for _ in range(img_h)]  # ambient
+        zbuf = [[0.0] * img_w for _ in range(img_h)]
+
+        half_w = img_w / 2.0
+        half_h = img_h / 2.0
+        # Scale K1 to pixel resolution (original K1 is for char grid).
+        # Pixels are square, so use the same scale for both axes.
+        # (The ASCII renderer uses a 2.0 factor on dy to compensate for
+        # tall/narrow terminal chars — that's not needed for pixels.)
+        K1x = self.K1 * img_w / self.width
+        K1y = K1x  # square pixels → same scale as x
+
+        cosA = math.cos(self.A)
+        sinA = math.sin(self.A)
+        cosB = math.cos(self.B)
+        sinB = math.sin(self.B)
+
+        drag = 0.08
+        eff_A = self.disk_A + drag * math.sin(self.A)
+        eff_B = self.disk_B + drag * math.sin(self.B)
+        cosDA = math.cos(eff_A)
+        sinDA = math.sin(eff_A)
+        cosDB = math.cos(eff_B)
+        sinDB = math.sin(eff_B)
+
+        nx = -sinDB * cosDA
+        ny = cosDB * cosDA
+        nz = sinDA
+
+        # === Pass 1: Accretion disk (pixel-resolution ray casting) ===
+        disk_inner = 0.3
+        disk_outer = 5.5
+        disk_peak = 2.0
+        n_dot_c = nz * self.K2
+
+        if abs(nz) > 0.01:
+            for yp in range(img_h):
+                for xp in range(img_w):
+                    dx = (xp - half_w) / K1x
+                    dy = (half_h - yp) / K1y
+                    denom = nx * dx + ny * dy + nz
+                    if abs(denom) < 1e-6:
+                        continue
+                    t = n_dot_c / denom
+                    if t <= 0.5:
+                        continue
+                    vx = t * dx
+                    vy = t * dy
+                    vz = t - self.K2
+                    dist = math.sqrt(vx * vx + vy * vy + vz * vz)
+                    if disk_inner <= dist <= disk_outer:
+                        brightness = math.exp(-((dist - disk_peak) ** 2) / 2.0)
+                        ooz = 1.0 / t
+                        if brightness > 0.05 and ooz > zbuf[yp][xp]:
+                            zbuf[yp][xp] = ooz
+                            bright[yp][xp] = brightness
+
+        # === Pass 2: Torus shadow ===
+        R1_shadow = self.R1 * 1.15
+        R2_shadow = self.R2
+        is_shadow = [[False] * img_w for _ in range(img_h)]
+        is_inner = [[False] * img_w for _ in range(img_h)]
+
+        theta = 0.0
+        while theta < 2 * math.pi:
+            costheta = math.cos(theta)
+            sintheta = math.sin(theta)
+            phi = 0.0
+            while phi < 2 * math.pi:
+                cosphi = math.cos(phi)
+                sinphi = math.sin(phi)
+                circlex = R2_shadow + R1_shadow * costheta
+                circley = R1_shadow * sintheta
+                x = circlex * (cosB * cosphi + sinA * sinB * sinphi) - circley * cosA * sinB
+                y = circlex * (sinB * cosphi - sinA * cosB * sinphi) + circley * cosA * cosB
+                z = self.K2 + cosA * circlex * sinphi + circley * sinA
+                if z > 0.5:
+                    ooz = 1.0 / z
+                    xp = int(half_w + K1x * ooz * x)
+                    yp = int(half_h - K1y * ooz * y)
+                    if 0 <= xp < img_w and 0 <= yp < img_h:
+                        is_shadow[yp][xp] = True
+                        if ooz > zbuf[yp][xp]:
+                            zbuf[yp][xp] = ooz
+                            bright[yp][xp] = 0.0
+                            is_inner[yp][xp] = (costheta < 0)
+                phi += 0.002
+            theta += 0.01
+
+        # Blank dim disk pixels inside shadow
+        min_bright = 0.3
+        for yp in range(img_h):
+            for xp in range(img_w):
+                if is_shadow[yp][xp] and 0 < bright[yp][xp] < min_bright:
+                    bright[yp][xp] = 0.0
+
+        # === Pass 2b: Photon ring glow ===
+        # Glow radius scales with pixel resolution
+        glow_radius = max(2, int(3 * img_w / 480))
+        edge_pixels = []
+        for yp in range(img_h):
+            for xp in range(img_w):
+                if not is_shadow[yp][xp]:
+                    continue
+                is_edge = False
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny2 = yp + dy
+                    nx2 = xp + dx
+                    if 0 <= ny2 < img_h and 0 <= nx2 < img_w:
+                        if not is_shadow[ny2][nx2]:
+                            is_edge = True
+                            break
+                    else:
+                        is_edge = True
+                        break
+                if is_edge:
+                    edge_pixels.append((yp, xp))
+
+        for ey, ex in edge_pixels:
+            for dy in range(-glow_radius, glow_radius + 1):
+                for dx in range(-glow_radius, glow_radius + 1):
+                    ny2 = ey + dy
+                    nx2 = ex + dx
+                    if 0 <= ny2 < img_h and 0 <= nx2 < img_w:
+                        if is_shadow[ny2][nx2]:
+                            continue
+                        d = math.sqrt(dx * dx + dy * dy)
+                        if d <= glow_radius:
+                            glow_b = 1.0 - (d / (glow_radius + 1))
+                            if glow_b > bright[ny2][nx2]:
+                                bright[ny2][nx2] = glow_b
+
+        # === Pass 3: Lensed ring (shadow-edge based) ===
+        shadow_y_sum = 0.0
+        shadow_count = 0
+        for yp in range(img_h):
+            for xp in range(img_w):
+                if is_shadow[yp][xp]:
+                    shadow_y_sum += yp
+                    shadow_count += 1
+        shadow_cy = shadow_y_sum / shadow_count if shadow_count > 0 else half_h
+
+        ring_radius = max(3, int(5 * img_w / 480))
+        for ey, ex in edge_pixels:
+            vert_dist = abs(ey - shadow_cy) / (img_h / 2.0)
+            vert_dist = min(vert_dist, 1.0)
+            ring_bright = vert_dist * vert_dist * 1.5
+            for dy in range(-ring_radius, ring_radius + 1):
+                for dx in range(-ring_radius, ring_radius + 1):
+                    ny2 = ey + dy
+                    nx2 = ex + dx
+                    if 0 <= ny2 < img_h and 0 <= nx2 < img_w:
+                        if is_shadow[ny2][nx2] or is_inner[ny2][nx2]:
+                            continue
+                        d = math.sqrt(dx * dx + dy * dy)
+                        if d <= ring_radius:
+                            falloff = 1.0 - (d / (ring_radius + 1))
+                            b = ring_bright * falloff
+                            if b > bright[ny2][nx2]:
+                                bright[ny2][nx2] = b
+
+        return bright
+
+    def save_video(self, path, n_frames=150, fps=30):
+        """Render n_frames and save as a video or animated image.
+
+        Displays each frame in a live tkinter preview window as it is
+        rendered, then saves all frames to the output file.
+
+        Args:
+            path: Output file path (.mp4, .gif, .webm, etc.).
+            n_frames: Number of frames to render.
+            fps: Frames per second.
+        """
+        import contextlib
+        import numpy as np
+        import tkinter as tk
+        import tqdm
+        from PIL import Image, ImageTk
+
+        img_w = self.width * 6
+        img_h = self.height * 12
 
         frames = []
-        for i in range(n_frames):
-            brightness = self.render_frame_pixels()
-            img = Image.new('L', (img_w, img_h), 0)
-            pix = img.load()
-            for yr, row in enumerate(brightness):
-                for xc, b in enumerate(row):
-                    v = int(b * 255)
-                    for dy in range(cell_h):
-                        for dx in range(cell_w):
-                            pix[xc * cell_w + dx, yr * cell_h + dy] = v
-            frames.append(img)
-            self.A += 0.04
-            self.B += 0.02
-            print(f'\rRendering frame {i + 1}/{n_frames}', end='', flush=True)
+        with contextlib.ExitStack() as stack:
+            # Live preview window — destroyed automatically on exit
+            root = tk.Tk()
+            stack.callback(root.destroy)
+            root.title('Interstellar Donut - Rendering...')
+            root.resizable(False, False)
+            canvas = tk.Canvas(root, width=img_w, height=img_h, bg='black',
+                               highlightthickness=0)
+            canvas.pack()
+            tk_img_ref = [None]  # mutable ref to prevent GC of PhotoImage
+
+            for i in tqdm.tqdm(range(n_frames), desc='Rendering', unit='frame'):
+                brightness = self.render_frame_pixels(img_w, img_h)
+                img = np.array(brightness, dtype=np.float32)
+                frame = (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+                frames.append(frame)
+                self.A += 0.04
+                self.B += 0.02
+
+                # Update live preview
+                pil_img = Image.fromarray(frame, mode='L')
+                tk_img_ref[0] = ImageTk.PhotoImage(pil_img)
+                canvas.delete('all')
+                canvas.create_image(0, 0, anchor=tk.NW, image=tk_img_ref[0])
+                root.title(f'Interstellar Donut - Frame {i + 1}/{n_frames}')
+                root.update()
 
         print()
-        duration_ms = int(1000 / fps)
-        frames[0].save(
-            path,
-            save_all=True,
-            append_images=frames[1:],
-            duration=duration_ms,
-            loop=0,
-        )
+
+        if path.endswith('.gif'):
+            from PIL import Image
+            pil_frames = [Image.fromarray(f, mode='L') for f in frames]
+            pil_frames[0].save(
+                path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=int(1000 / fps),
+                loop=0,
+            )
+        else:
+            import imageio.v3 as iio
+            # MP4/H264 requires RGB — replicate grayscale to 3 channels
+            rgb_frames = [np.stack([f, f, f], axis=-1) for f in frames]
+            iio.imwrite(path, np.stack(rgb_frames), fps=fps, codec='libx264')
+
         print(f'Saved {path} ({n_frames} frames, {img_w}x{img_h})')
 
     def run(self, duration=9e9):
@@ -501,12 +702,8 @@ def main():
         help='Render as pixel graphics and save to a file instead of ASCII animation',
     )
     parser.add_argument(
-        '--output', '-o', default='donut.gif',
-        help='Output file path for --graphics mode (default: donut.gif)',
-    )
-    parser.add_argument(
-        '--frames', '-n', type=int, default=150,
-        help='Number of frames to render in --graphics mode (default: 150)',
+        '--frames', '-n', type=int, default=314,
+        help='Number of frames to render in --graphics mode (default: 314)',
     )
     args = parser.parse_args()
 
@@ -520,7 +717,7 @@ def main():
 
     if args.graphics:
         donut = InterstellarDonut(width=width, height=height)
-        donut.save_gif(args.output, n_frames=args.frames)
+        donut.save_video('donut.gif', n_frames=args.frames)
     else:
         donut = InterstellarDonut(width=width, height=height)
         print('Interstellar Donut - Press Ctrl+C to exit')

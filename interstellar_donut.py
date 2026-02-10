@@ -147,7 +147,7 @@ class InterstellarDonut:
                 x += deflection_x
                 y += deflection_y
                 z += deflection_z
-                ooz = 1.0 / z if z != 0 else 0
+                ooz = 1.0 / z if abs(z) > 0.01 else 0
                 
                 # Project to 2D screen coordinates
                 xp = int(self.width / 2 + self.width / 3 * ooz * x)
@@ -185,7 +185,7 @@ class InterstellarDonut:
                     # Only render if facing towards viewer and closer than previous points
                     if luminance > 0 and ooz > zbuffer[yp][xp]:
                         zbuffer[yp][xp] = ooz
-                        luminance_index = int(luminance * 8)
+                        luminance_index = int(luminance * (len(self.luminance_chars) - 1))
                         luminance_index = max(0, min(luminance_index, len(self.luminance_chars) - 1))
                         output[yp][xp] = self.luminance_chars[luminance_index]
         
@@ -257,7 +257,7 @@ def main():
         terminal_size = os.get_terminal_size()
         width = terminal_size.columns
         height = terminal_size.lines - 1  # Leave room for prompt
-    except:
+    except OSError:
         width = 80
         height = 24
     

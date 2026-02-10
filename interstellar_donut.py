@@ -61,6 +61,7 @@ import math
 import time
 import sys
 import os
+import argparse
 
 
 class InterstellarDonut:
@@ -115,8 +116,15 @@ class InterstellarDonut:
         sys.stdout.write('\x1b[2J\x1b[H')
         sys.stdout.flush()
 
-    def render_frame(self):
-        """Render a single frame of the rotating donut with accretion disk."""
+    def render_frame(self, display=True):
+        """Render a single frame of the rotating donut with accretion disk.
+
+        Args:
+            display: If True, print the frame to stdout.
+
+        Returns:
+            The 2D character grid (list of lists of chars).
+        """
         ambient = '.'
         output = [[ambient for _ in range(self.width)] for _ in range(self.height)]
         zbuffer = [[0.0 for _ in range(self.width)] for _ in range(self.height)]
@@ -327,86 +335,133 @@ class InterstellarDonut:
                                 if glow_idx > existing_idx:
                                     output[ny2][nx2] = glow_chars[min(glow_idx, len(glow_chars) - 1)]
 
-        # === Pass 3: Lensed ring (parametric ring in perpendicular plane) ===
+        # === Pass 3: Lensed ring (shadow-edge based) ===
         # The lensed ring represents the gravitationally bent image of the
         # far side of the accretion disk, appearing to arc over the top and
-        # under the bottom of the torus. It lies in a plane perpendicular to
-        # the disk plane and containing the view direction.
-        # Rendered AFTER the torus shadow so ring arcs are visible at the
-        # edges of the shadow body — light appearing to bend around the hole.
-        #
-        # Plane basis vectors:
-        #   n  = (-sinB*cosA, cosB*cosA, sinA)     — disk normal
-        #   e2 = (-sinA*sinB, sinA*cosB, -cosA)    — perpendicular to n in the n-view plane
-        # Ring point = center + r * (cos(α)*n + sin(α)*e2)
-        # Brightness peaks at top/bottom (sin²α ≈ 1) and fades at sides.
+        # under the bottom of the torus shadow.
+        # Instead of a parametric circle (which doesn't align with the tilted
+        # torus outline), we trace the ACTUAL shadow edge and apply brightness
+        # based on vertical distance from the shadow center — bright at
+        # top/bottom (perpendicular to the accretion disk), dim at the sides.
+        # This guarantees the ring always hugs the shadow silhouette.
 
-        # e1 = normalize(view_dir × n), where view_dir = (0,0,1)
-        # view × n = (-ny, nx, 0). This gives horizontal extent so the
-        # lensed ring renders as an ellipse, not a collapsed vertical line.
-        e1_len = math.sqrt(nx * nx + ny * ny)
-        if e1_len > 0.01:
-            e1x = -ny / e1_len
-            e1y = nx / e1_len
-            e1z = 0.0
-        else:
-            e1x, e1y, e1z = 1.0, 0.0, 0.0
+        # Find vertical center of shadow
+        shadow_y_sum = 0.0
+        shadow_count = 0
+        for yp in range(self.height):
+            for xp in range(self.width):
+                if is_shadow_pixel[yp][xp]:
+                    shadow_y_sum += yp
+                    shadow_count += 1
+        shadow_cy = shadow_y_sum / shadow_count if shadow_count > 0 else half_h
 
-        ring_inner = 0.3
-        ring_outer = 5.5
-        ring_peak = 2.0
-        ring_r_step = 0.08
-        ring_alpha_step = 0.04
+        # Apply ring brightness along edge pixels and their neighbors
+        ring_radius = 3  # pixels of ring spread outside shadow edge
+        ring_chars = self.disk_chars
 
-        r = ring_inner
-        while r <= ring_outer:
-            base_bright = math.exp(-((r - ring_peak) ** 2) / 0.5) * 1.5
+        for ey, ex in edge_pixels:
+            # Vertical distance from shadow center, normalized to [0..1]
+            vert_dist = abs(ey - shadow_cy) / (self.height / 2.0)
+            vert_dist = min(vert_dist, 1.0)
+            # Brightness peaks at top/bottom (large vert_dist)
+            ring_bright = vert_dist * vert_dist * 1.5
 
-            alpha = 0.0
-            while alpha < 2 * math.pi:
-                ca = math.cos(alpha)
-                sa = math.sin(alpha)
-
-                x = r * (ca * e1x + sa * nx)
-                y = r * (ca * e1y + sa * ny)
-                z = self.K2 + r * (ca * e1z + sa * nz)
-
-                if z > 0.5:
-                    ooz = 1.0 / z
-                    xp = int(half_w + self.K1 * ooz * x)
-                    yp = int(half_h - self.K1 / 2 * ooz * y)
-
-                    if 0 <= xp < self.width and 0 <= yp < self.height:
-                        # Visible at poles (sa ≈ ±1), fades at equator
-                        brightness = base_bright * sa * sa
-                        char_idx = int(brightness * (len(self.disk_chars) - 1))
-                        char_idx = min(char_idx, len(self.disk_chars) - 1)
-                        if char_idx >= 1:
-                            # The ring should only be visible at the
-                            # silhouette EDGE of the shadow (light bending
-                            # around the torus), not deep inside it.
-                            # Also skip inner tube surface — it must stay black.
-                            if is_inner_surface[yp][xp]:
-                                alpha += ring_alpha_step
-                                continue
-                            is_shadow = is_shadow_pixel[yp][xp]
-                            near_surface = (ooz >= zbuffer[yp][xp] * 0.92)
-                            if not (is_shadow and not near_surface):
-                                existing_idx = self.disk_chars.find(output[yp][xp])
+            for dy in range(-ring_radius, ring_radius + 1):
+                for dx in range(-ring_radius, ring_radius + 1):
+                    ny2 = ey + dy
+                    nx2 = ex + dx
+                    if 0 <= ny2 < self.height and 0 <= nx2 < self.width:
+                        if is_shadow_pixel[ny2][nx2]:
+                            continue
+                        if is_inner_surface[ny2][nx2]:
+                            continue
+                        d = math.sqrt(dx * dx + dy * dy)
+                        if d <= ring_radius:
+                            falloff = 1.0 - (d / (ring_radius + 1))
+                            brightness = ring_bright * falloff
+                            char_idx = int(brightness * (len(ring_chars) - 1))
+                            char_idx = min(char_idx, len(ring_chars) - 1)
+                            if char_idx >= 1:
+                                existing_idx = ring_chars.find(output[ny2][nx2])
                                 if existing_idx < 0:
                                     existing_idx = 0
                                 if char_idx > existing_idx:
-                                    output[yp][xp] = self.disk_chars[char_idx]
-
-                alpha += ring_alpha_step
-            r += ring_r_step
+                                    output[ny2][nx2] = ring_chars[char_idx]
 
         #   Print the frame as a single write for flicker-free output
-        buf = ['\x1b[H']
+        if display:
+            buf = ['\x1b[H']
+            for row in output:
+                buf.append(''.join(row))
+            sys.stdout.write('\n'.join(buf) + '\x1b[J')
+            sys.stdout.flush()
+
+        return output
+
+    # Brightness lookup: map each character to a 0.0-1.0 brightness value.
+    # Combines both disk_chars and luminance_chars into a single table.
+    _CHAR_BRIGHTNESS = {
+        ' ': 0.0, '.': 0.05, ',': 0.1, '-': 0.15, '~': 0.2,
+        ':': 0.3, ';': 0.4, '=': 0.5, '!': 0.6, '*': 0.7,
+        '#': 0.8, '$': 0.9, '@': 1.0,
+    }
+
+    def render_frame_pixels(self):
+        """Render one frame as a 2D array of brightness floats [0..1].
+
+        Returns:
+            List[List[float]]: height x width brightness values.
+        """
+        output = self.render_frame(display=False)
+        pixels = []
         for row in output:
-            buf.append(''.join(row))
-        sys.stdout.write('\n'.join(buf) + '\x1b[J')
-        sys.stdout.flush()
+            prow = []
+            for ch in row:
+                prow.append(self._CHAR_BRIGHTNESS.get(ch, 0.0))
+            pixels.append(prow)
+        return pixels
+
+    def save_gif(self, path, n_frames=150, fps=30):
+        """Render n_frames and save as an animated GIF.
+
+        Args:
+            path: Output file path (should end in .gif).
+            n_frames: Number of frames to render.
+            fps: Frames per second in the output GIF.
+        """
+        from PIL import Image
+
+        cell_w = 6   # pixels per character cell width
+        cell_h = 12  # pixels per character cell height
+        img_w = self.width * cell_w
+        img_h = self.height * cell_h
+
+        frames = []
+        for i in range(n_frames):
+            brightness = self.render_frame_pixels()
+            img = Image.new('L', (img_w, img_h), 0)
+            pix = img.load()
+            for yr, row in enumerate(brightness):
+                for xc, b in enumerate(row):
+                    v = int(b * 255)
+                    for dy in range(cell_h):
+                        for dx in range(cell_w):
+                            pix[xc * cell_w + dx, yr * cell_h + dy] = v
+            frames.append(img)
+            self.A += 0.04
+            self.B += 0.02
+            print(f'\rRendering frame {i + 1}/{n_frames}', end='', flush=True)
+
+        print()
+        duration_ms = int(1000 / fps)
+        frames[0].save(
+            path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration_ms,
+            loop=0,
+        )
+        print(f'Saved {path} ({n_frames} frames, {img_w}x{img_h})')
 
     def run(self, duration=9e9):
         """
@@ -440,6 +495,21 @@ class InterstellarDonut:
 
 def main():
     """Main entry point for the script."""
+    parser = argparse.ArgumentParser(description='Interstellar Donut')
+    parser.add_argument(
+        '--graphics', action='store_true',
+        help='Render as pixel graphics and save to a file instead of ASCII animation',
+    )
+    parser.add_argument(
+        '--output', '-o', default='donut.gif',
+        help='Output file path for --graphics mode (default: donut.gif)',
+    )
+    parser.add_argument(
+        '--frames', '-n', type=int, default=150,
+        help='Number of frames to render in --graphics mode (default: 150)',
+    )
+    args = parser.parse_args()
+
     try:
         terminal_size = os.get_terminal_size()
         width = terminal_size.columns
@@ -448,12 +518,14 @@ def main():
         width = 80
         height = 24
 
-    donut = InterstellarDonut(width=width, height=height)
-
-    print("Interstellar Donut - Press Ctrl+C to exit")
-    time.sleep(2)
-
-    donut.run()
+    if args.graphics:
+        donut = InterstellarDonut(width=width, height=height)
+        donut.save_gif(args.output, n_frames=args.frames)
+    else:
+        donut = InterstellarDonut(width=width, height=height)
+        print('Interstellar Donut - Press Ctrl+C to exit')
+        time.sleep(2)
+        donut.run()
 
 
 if __name__ == "__main__":

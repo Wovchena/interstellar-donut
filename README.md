@@ -18,7 +18,7 @@ This visualization combines:
 
 1. **Classic Donut Rendering**: Based on the famous "donut.c" by Andy Sloane, rendering a 3D torus using ASCII characters with proper lighting and rotation.
 
-2. **General Relativity Effects**: 
+2. **General Relativity Effects**:
    - **Light Deflection**: Light paths bend near massive objects following the Schwarzschild metric
    - **Gravitational Redshift**: Light loses energy (appears dimmer) as it escapes from near the black hole
    - **Photon Sphere**: A glowing region where photons can orbit the black hole
@@ -27,23 +27,6 @@ This visualization combines:
 
 - Python 3.6 or higher
 - A terminal that supports ANSI escape codes (most modern terminals)
-
-## Usage
-
-Simply run the script:
-
-```bash
-python3 interstellar_donut.py
-```
-
-Or make it executable and run directly:
-
-```bash
-chmod +x interstellar_donut.py
-./interstellar_donut.py
-```
-
-Press `Ctrl+C` to exit the animation.
 
 ## How It Works
 
@@ -71,7 +54,3 @@ Inspired by:
 - The original "donut.c" by Andy Sloane (2006)
 - The movie "Interstellar" (2014) and its scientifically accurate black hole visualization
 - The work of physicist Kip Thorne on black hole visualization
-
-## License
-
-See LICENSE file for details.

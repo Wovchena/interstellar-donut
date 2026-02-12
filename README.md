@@ -73,9 +73,9 @@ The script:
 2. **Applies Rotation**: Rotates the torus in 3D space using rotation matrices
 3. **Simulates Light Bending**: Calculates gravitational deflection of light rays near the black hole center
 4. **Projects to 2D**: Uses perspective projection to convert 3D coordinates to screen space
-5. **Calculates Shading**: Determines brightness based on surface normal and light direction
-6. **Renders ASCII**: Maps brightness values to ASCII characters (from `.` to `@`)
-7. **Adds Effects**: Overlays a photon sphere glow and applies gravitational redshift
+5. **Computes Visibility**: Determines which parts of the torus and accretion disk are visible in front of the black hole shadow
+6. **Renders ASCII**: Draws the accretion disk, torus silhouette, and glow/ring overlays using a fixed set of ASCII characters
+7. **Adds Effects**: Overlays a photon sphere–like glow and ring structure around the black hole
 
 ## The Science
 
